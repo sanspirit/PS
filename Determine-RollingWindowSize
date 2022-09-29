@@ -1,0 +1,80 @@
+#No need to verify PerformRollingDeploy as this is a checkbox and will always have a boolean value. Report value back for logging.
+
+Write-Host "Getting Roles..."
+$apiKey = ($OctopusParameters['System.api.key'])
+$Header =  @{ "X-Octopus-ApiKey" = $apiKey }
+$projectid = ($OctopusParameters['Octopus.Project.Id'])
+try {
+  $response = Invoke-RestMethod -Method GET -Uri "https://octopus.ctazure.co.uk/api/Spaces-63/deploymentprocesses/deploymentprocess-$projectid" -Headers $Header
+}
+catch {
+  Throw "Cannot find deployment process from API"
+}
+$role = ($response.Steps | Where-Object {$PSItem.Name -eq "Deploy Website" -or $PSItem.Name -eq "Deploy Service"}).Properties.'Octopus.Action.TargetRoles'
+if (-NOT $role) {throw "Target role not found"}
+Write-Host ('Server Role for Rolling Deploy: ' + $role)
+
+Try
+{
+  $performRollingDeploy = [System.Convert]::ToBoolean($OctopusParameters['DRDWSPerformRollingDeploy'])
+  Write-Host ('Perform Rolling Deploy: ' + $performRollingDeploy)
+}
+Catch
+{
+  Throw "Cannot convert Perform Rolling Deploy: '" + $OctopusParameters['DRDWSPerformRollingDeploy'] + "' to boolean value. Try having the expression or variable evaluate to 'True' or 'False'."
+}
+
+#Verify ServerPercentageToDeploy can be converted to integer.
+If ([string]::IsNullOrEmpty($OctopusParameters['DRDWSServerPercentageToDeploy']))
+{
+  Throw 'Server percentage to deploy cannot be null.'
+}
+If ([string]::IsNullOrEmpty($OctopusParameters['DRDWSServerPercentageToDeployOOH']))
+{
+  Throw 'Server percentage to deploy (OOH) cannot be null.'
+}
+
+$date = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date), 'GMT Standard Time')
+
+if ($date.TimeOfDay.Hours -ge 19 -or $date.TimeOfDay.Hours -lt 8) {
+    Write-Host "Time is: $date, Determining Out of Hours Deployment"
+    $determinedpercentage = $OctopusParameters['DRDWSServerPercentageToDeployOOH']
+} 
+else {
+    Write-Host "Time is: $date, Determining In Hours Deployment"
+    $determinedpercentage = $OctopusParameters['DRDWSServerPercentageToDeploy']
+}
+
+[int]$serverPercentageToDeploy = 0
+[bool]$result = [int]::TryParse($determinedpercentage, [ref]$serverPercentageToDeploy)
+
+If ($result)
+{
+  Write-Host ('Server percentage to deploy: ' + $serverPercentageToDeploy + '%')
+  $serverPercentToDisconnect = $serverPercentageToDeploy / 100
+}
+Else
+{
+  Throw "Cannot convert Server percentage to deploy: '" + $determinedpercentage + "' to integer."
+}
+
+$serverCountToDeployTo = 9999
+
+If ($performRollingDeploy)
+{
+  $servers = $OctopusParameters['Octopus.Environment.MachinesInRole[' + $role + ']']
+  $totalMachines = ($servers.Split(',')).Count
+  $serverCountToDeployTo = [math]::Round(($totalMachines * $serverPercentToDisconnect))
+
+  Write-Host ('Total machines: ' + $totalMachines)
+
+  If ($serverCountToDeployTo -eq 0)
+  {
+    $serverCountToDeployTo++
+  }
+}
+
+Write-Host ('Window Size: ' + $serverCountToDeployTo)
+
+#To use this value, set Window size value to: #{Octopus.Action[Determine Rolling Deploy Window Size].Output.WindowSize}
+Set-OctopusVariable -name "WindowSize" -value $serverCountToDeployTo
